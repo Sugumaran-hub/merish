@@ -31,19 +31,22 @@ jobs:
           flutter create --platforms=android --org com.merish.player --project-name merish /tmp/merish_app
           cd /tmp/merish_app
 
-          # 2. Add dependencies cleanly
+          # 2. Add dependencies (including native file picker)
           flutter pub add media_kit
           flutter pub add media_kit_video
           flutter pub add media_kit_libs_android_video
           flutter pub add permission_handler
+          flutter pub add file_picker
 
-          # 3. Inject our pure AMOLED hardware engine
+          # 3. Inject AMOLED Player with File Picker
           cat << 'EOF' > lib/main.dart
+          import 'dart:io';
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
           import 'package:media_kit/media_kit.dart';
           import 'package:media_kit_video/media_kit_video.dart';
           import 'package:permission_handler/permission_handler.dart';
+          import 'package:file_picker/file_picker.dart';
 
           void main() async {
             WidgetsFlutterBinding.ensureInitialized();
@@ -83,7 +86,7 @@ jobs:
           class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
             late final Player player;
             late final VideoController controller;
-            bool isReady = false;
+            bool isFileLoaded = false;
 
             @override
             void initState() {
@@ -91,10 +94,7 @@ jobs:
               initEngine();
             }
 
-            Future<void> initEngine() async {
-              await Permission.storage.request();
-              await Permission.videos.request();
-
+            void initEngine() {
               player = Player(
                 configuration: const PlayerConfiguration(
                   bufferSize: 32 * 1024 * 1024,
@@ -108,10 +108,21 @@ jobs:
                   hwdec: 'mediacodec',
                 ),
               );
+            }
 
-              if (mounted) {
+            Future<void> pickAndPlayVideo() async {
+              await Permission.storage.request();
+              await Permission.videos.request();
+
+              FilePickerResult? result = await FilePicker.platform.pickFiles(
+                type: FileType.video,
+              );
+
+              if (result != null && result.files.single.path != null) {
+                final filePath = result.files.single.path!;
+                await player.open(Media(filePath));
                 setState(() {
-                  isReady = true;
+                  isFileLoaded = true;
                 });
               }
             }
@@ -124,41 +135,146 @@ jobs:
 
             @override
             Widget build(BuildContext context) {
-              if (!isReady) {
-                return const Scaffold(
-                  backgroundColor: Colors.black,
-                  body: Center(
-                    child: CircularProgressIndicator(
-                      color: Colors.amber,
-                      strokeWidth: 2.5,
-                    ),
-                  ),
-                );
-              }
-
               return Scaffold(
                 backgroundColor: Colors.black,
-                body: Center(
-                  child: Video(
-                    controller: controller,
-                    controls: AdaptiveVideoControls,
-                  ),
+                body: Stack(
+                  children: [
+                    Center(
+                      child: isFileLoaded
+                          ? Video(
+                              controller: controller,
+                              controls: AdaptiveVideoControls,
+                            )
+                          : Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Container(
+                                  width: 80,
+                                  height: 80,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: Colors.amber, width: 2),
+                                  ),
+                                  child: const Icon(
+                                    Icons.play_arrow_rounded,
+                                    size: 50,
+                                    color: Colors.amber,
+                                  ),
+                                ),
+                                const SizedBox(height: 24),
+                                const Text(
+                                  "Merish",
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 28,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.5,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                const Text(
+                                  "Snapdragon Hardware Accelerated Engine",
+                                  style: TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                const SizedBox(height: 32),
+                                ElevatedButton.icon(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.amber,
+                                    foregroundColor: Colors.black,
+                                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(28),
+                                    ),
+                                  ),
+                                  onPressed: pickAndPlayVideo,
+                                  icon: const Icon(Icons.video_library_rounded),
+                                  label: const Text(
+                                    "Open Video File",
+                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                  ),
+                                ),
+                              ],
+                            ),
+                    ),
+                    if (isFileLoaded)
+                      Positioned(
+                        top: 24,
+                        left: 16,
+                        child: IconButton(
+                          icon: const Icon(Icons.arrow_back, color: Colors.white),
+                          onPressed: () {
+                            player.stop();
+                            setState(() {
+                              isFileLoaded = false;
+                            });
+                          },
+                        ),
+                      ),
+                  ],
                 ),
               );
             }
           }
           EOF
 
-          # 4. Patch compileSdk to 37 and minSdk to 21 for Kotlin DSL (build.gradle.kts)
+          # 4. Set App Display Name to "Merish" (Capital M) in AndroidManifest
+          sed -i 's/android:label="merish"/android:label="Merish"/g' android/app/src/main/AndroidManifest.xml
+
+          # 5. Generate Custom Dark Minimalist Cinema Icon
+          python3 -c "
+          import os
+          import struct
+          import zlib
+
+          def make_png(width, height):
+              raw_data = bytearray()
+              cx, cy, r = width // 2, height // 2, width // 2 - 8
+              for y in range(height):
+                  raw_data.append(0)
+                  for x in range(width):
+                      dx = x - cx
+                      dy = y - cy
+                      dist_sq = dx*dx + dy*dy
+                      # Outer gold circle border or solid AMOLED background
+                      if dist_sq <= r*r:
+                          # Play triangle coordinates
+                          if x >= cx - 12 and x <= cx + 24 and abs(dy) <= (x - (cx - 12)) * 0.8:
+                              raw_data.extend([255, 191, 0, 255]) # Amber Gold Play symbol
+                          else:
+                              raw_data.extend([10, 10, 10, 255]) # Pure Dark Circle
+                      else:
+                          raw_data.extend([0, 0, 0, 0])
+              
+              def chunk(tag, data):
+                  return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
+
+              header = b'\x89PNG\r\n\x1a\n'
+              ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0))
+              idat = chunk(b'IDAT', zlib.compress(bytes(raw_data)))
+              iend = chunk(b'IEND', b'')
+              return header + ihdr + idat + iend
+
+          png_bytes = make_png(192, 192)
+          res_dir = 'android/app/src/main/res'
+          for d in os.listdir(res_dir):
+              if d.startswith('mipmap'):
+                  with open(os.path.join(res_dir, d, 'ic_launcher.png'), 'wb') as f:
+                      f.write(png_bytes)
+          "
+
+          # 6. Apply SDK 37 & MinSDK 21 rules
           find android/app -name "build.gradle*" -exec sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 37/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 37/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' {} +
 
-          # 5. Build Snapdragon ARM64 APK
+          # 7. Build Snapdragon ARM64 APK
           flutter build apk --split-per-abi --release
 
-          # 6. Copy output APK
+          # 8. Copy output APK
           mkdir -p $GITHUB_WORKSPACE/output
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk $GITHUB_WORKSPACE/output/merish-arm64-v8a.apk
 
