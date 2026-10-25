@@ -19,14 +19,27 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Flutter Environment
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
 
-      - name: Fetch Dependencies
-        run: flutter pub get
+      - name: Repair Project Scaffolding
+        run: |
+          # Backup our custom files
+          cp lib/main.dart /tmp/main.dart.bak
+          cp pubspec.yaml /tmp/pubspec.yaml.bak
+
+          # Generate official Android skeleton cleanly
+          flutter create --org com.merish.player --project-name merish .
+
+          # Restore our custom engine files
+          cp /tmp/main.dart.bak lib/main.dart
+          cp /tmp/pubspec.yaml.bak pubspec.yaml
+
+          # Configure Android 64-bit target & MediaCodec
+          flutter pub get
 
       - name: Build Merish ARM64 APK
         run: flutter build apk --split-per-abi --release
