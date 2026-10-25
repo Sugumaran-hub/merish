@@ -1,0 +1,27 @@
+name: merish
+description: Studio-grade zero-bloat offline media engine.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Core Hardware-Accelerated Playback Engine (libmpv)
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_android_video: ^1.6.0
+
+  # Storage Permissions (Zero Internet Access)
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
