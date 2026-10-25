@@ -24,14 +24,14 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Build Merish APK Cleanly
+      - name: Build Merish Engine
         run: |
-          # 1. Fresh pure Flutter project
+          # 1. Fresh pure Android Flutter project
           rm -rf /tmp/merish_app
-          flutter create --org com.merish.player --project-name merish /tmp/merish_app
+          flutter create --platforms=android --org com.merish.player --project-name merish /tmp/merish_app
           cd /tmp/merish_app
 
-          # 2. Add dependencies
+          # 2. Add dependencies cleanly
           flutter pub add media_kit
           flutter pub add media_kit_video
           flutter pub add media_kit_libs_android_video
@@ -150,21 +150,14 @@ jobs:
           }
           EOF
 
-          # 4. Safe minSdkVersion update without breaking Gradle syntax
-          python3 -c "
-          p = 'android/app/build.gradle'
-          with open(p, 'r') as f:
-              content = f.read()
-          content = content.replace('minSdkVersion = flutter.minSdkVersion', 'minSdkVersion = 21')
-          content = content.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 21')
-          with open(p, 'w') as f:
-              f.write(content)
-          "
+          # 4. Patch minSdkVersion 21 for both Groovy and Kotlin DSL
+          find android/app -name "build.gradle*" -exec sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' {} +
+          find android/app -name "build.gradle*" -exec sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' {} +
 
           # 5. Build Snapdragon ARM64 APK
           flutter build apk --split-per-abi --release
 
-          # 6. Copy output
+          # 6. Copy output APK
           mkdir -p $GITHUB_WORKSPACE/output
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk $GITHUB_WORKSPACE/output/merish-arm64-v8a.apk
 
