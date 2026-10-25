@@ -23,29 +23,146 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true
 
-      - name: Repair Project Scaffolding
+      - name: Build Clean App Structure
         run: |
-          # Backup our custom files
-          cp lib/main.dart /tmp/main.dart.bak
-          cp pubspec.yaml /tmp/pubspec.yaml.bak
+          # 1. Clean workspace completely and build standard Flutter project
+          cd /tmp
+          flutter create --org com.merish.player --project-name merish merish_app
+          
+          # 2. Add dependencies cleanly via flutter pub
+          cd merish_app
+          flutter pub add media_kit
+          flutter pub add media_kit_video
+          flutter pub add media_kit_libs_android_video
+          flutter pub add permission_handler
 
-          # Generate official Android skeleton cleanly
-          flutter create --org com.merish.player --project-name merish .
+          # 3. Inject our AMOLED Hardware Player Code
+          cat << 'EOF' > lib/main.dart
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+          import 'package:media_kit/media_kit.dart';
+          import 'package:media_kit_video/media_kit_video.dart';
+          import 'package:permission_handler/permission_handler.dart';
 
-          # Restore our custom engine files
-          cp /tmp/main.dart.bak lib/main.dart
-          cp /tmp/pubspec.yaml.bak pubspec.yaml
+          void main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            MediaKit.ensureInitialized();
+            await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+            runApp(const MerishPlayerApp());
+          }
 
-          # Configure Android 64-bit target & MediaCodec
-          flutter pub get
+          class MerishPlayerApp extends StatelessWidget {
+            const MerishPlayerApp({super.key});
 
-      - name: Build Merish ARM64 APK
-        run: flutter build apk --split-per-abi --release
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'Merish',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  brightness: Brightness.dark,
+                  scaffoldBackgroundColor: Colors.black,
+                  colorScheme: const ColorScheme.dark(
+                    primary: Colors.amber,
+                    surface: Colors.black,
+                  ),
+                ),
+                home: const VideoPlayerScreen(),
+              );
+            }
+          }
 
-      - name: Upload Merish APK Artifact
+          class VideoPlayerScreen extends StatefulWidget {
+            const VideoPlayerScreen({super.key});
+
+            @override
+            State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
+          }
+
+          class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
+            late final Player player;
+            late final VideoController controller;
+            bool isReady = false;
+
+            @override
+            void initState() {
+              super.initState();
+              initEngine();
+            }
+
+            Future<void> initEngine() async {
+              await Permission.storage.request();
+              await Permission.videos.request();
+
+              player = Player(
+                configuration: const PlayerConfiguration(
+                  bufferSize: 32 * 1024 * 1024,
+                  logLevel: LogLevel.none,
+                ),
+              );
+
+              controller = VideoController(
+                player,
+                configuration: const VideoControllerConfiguration(
+                  enableHardwareAcceleration: true,
+                  hwdec: 'mediacodec',
+                ),
+              );
+
+              if (mounted) {
+                setState(() {
+                  isReady = true;
+                });
+              }
+            }
+
+            @override
+            void dispose() {
+              player.dispose();
+              super.dispose();
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              if (!isReady) {
+                return const Scaffold(
+                  backgroundColor: Colors.black,
+                  body: Center(
+                    child: CircularProgressIndicator(
+                      color: Colors.amber,
+                      strokeWidth: 2.5,
+                    ),
+                  ),
+                );
+              }
+
+              return Scaffold(
+                backgroundColor: Colors.black,
+                body: Center(
+                  child: Video(
+                    controller: controller,
+                    controls: AdaptiveVideoControls,
+                  ),
+                ),
+              );
+            }
+          }
+          EOF
+
+          # 4. Set Hardware Acceleration & Permissions in AndroidManifest
+          sed -i '/<application/a \        android:hardwareAccelerated="true"' android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />' android/app/src/main/AndroidManifest.xml
+
+          # 5. Build Snapdragon ARM64 APK directly
+          flutter build apk --split-per-abi --release
+
+          # 6. Copy output APK to repository workspace
+          mkdir -p $GITHUB_WORKSPACE/output
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk $GITHUB_WORKSPACE/output/merish-arm64-v8a.apk
+
+      - name: Upload Merish APK
         uses: actions/upload-artifact@v4
         with:
           name: Merish-Engine-ARM64
-          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          path: output/merish-arm64-v8a.apk
