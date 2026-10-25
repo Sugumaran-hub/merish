@@ -31,14 +31,14 @@ jobs:
           flutter create --platforms=android --org com.merish.player --project-name merish /tmp/merish_app
           cd /tmp/merish_app
 
-          # 2. Add dependencies (including native file picker)
+          # 2. Add dependencies cleanly
           flutter pub add media_kit
           flutter pub add media_kit_video
           flutter pub add media_kit_libs_android_video
           flutter pub add permission_handler
-          flutter pub add file_picker
+          flutter pub add image_picker
 
-          # 3. Inject AMOLED Player with File Picker
+          # 3. Inject AMOLED Player with Native Gallery Video Picker
           cat << 'EOF' > lib/main.dart
           import 'dart:io';
           import 'package:flutter/material.dart';
@@ -46,7 +46,7 @@ jobs:
           import 'package:media_kit/media_kit.dart';
           import 'package:media_kit_video/media_kit_video.dart';
           import 'package:permission_handler/permission_handler.dart';
-          import 'package:file_picker/file_picker.dart';
+          import 'package:image_picker/image_picker.dart';
 
           void main() async {
             WidgetsFlutterBinding.ensureInitialized();
@@ -86,6 +86,7 @@ jobs:
           class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
             late final Player player;
             late final VideoController controller;
+            final ImagePicker _picker = ImagePicker();
             bool isFileLoaded = false;
 
             @override
@@ -114,16 +115,15 @@ jobs:
               await Permission.storage.request();
               await Permission.videos.request();
 
-              FilePickerResult? result = await FilePicker.platform.pickFiles(
-                type: FileType.video,
-              );
+              final XFile? video = await _picker.pickVideo(source: ImageSource.gallery);
 
-              if (result != null && result.files.single.path != null) {
-                final filePath = result.files.single.path!;
-                await player.open(Media(filePath));
-                setState(() {
-                  isFileLoaded = true;
-                });
+              if (video != null) {
+                await player.open(Media(video.path));
+                if (mounted) {
+                  setState(() {
+                    isFileLoaded = true;
+                  });
+                }
               }
             }
 
@@ -220,10 +220,10 @@ jobs:
           }
           EOF
 
-          # 4. Set App Display Name to "Merish" (Capital M) in AndroidManifest
+          # 4. Set App Display Name to "Merish"
           sed -i 's/android:label="merish"/android:label="Merish"/g' android/app/src/main/AndroidManifest.xml
 
-          # 5. Generate Custom Dark Minimalist Cinema Icon
+          # 5. Generate Minimalist Cinema App Icon
           python3 -c "
           import os
           import struct
@@ -238,13 +238,11 @@ jobs:
                       dx = x - cx
                       dy = y - cy
                       dist_sq = dx*dx + dy*dy
-                      # Outer gold circle border or solid AMOLED background
                       if dist_sq <= r*r:
-                          # Play triangle coordinates
                           if x >= cx - 12 and x <= cx + 24 and abs(dy) <= (x - (cx - 12)) * 0.8:
-                              raw_data.extend([255, 191, 0, 255]) # Amber Gold Play symbol
+                              raw_data.extend([255, 191, 0, 255])
                           else:
-                              raw_data.extend([10, 10, 10, 255]) # Pure Dark Circle
+                              raw_data.extend([10, 10, 10, 255])
                       else:
                           raw_data.extend([0, 0, 0, 0])
               
