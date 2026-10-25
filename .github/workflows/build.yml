@@ -37,7 +37,7 @@ jobs:
           flutter pub add media_kit_libs_android_video
           flutter pub add permission_handler
 
-          # 3. Inject our pure AMOLED hardware engine (logLevel cleanly removed)
+          # 3. Inject our pure AMOLED hardware engine
           cat << 'EOF' > lib/main.dart
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
@@ -149,7 +149,9 @@ jobs:
           }
           EOF
 
-          # 4. Patch minSdkVersion 21
+          # 4. Patch compileSdk to 37 and minSdk to 21 for Kotlin DSL (build.gradle.kts)
+          find android/app -name "build.gradle*" -exec sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 37/g' {} +
+          find android/app -name "build.gradle*" -exec sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 37/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' {} +
 
