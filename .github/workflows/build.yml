@@ -37,7 +37,7 @@ jobs:
           flutter pub add media_kit_libs_android_video
           flutter pub add permission_handler
 
-          # 3. Inject our pure AMOLED hardware engine
+          # 3. Inject our pure AMOLED hardware engine (const removed for LogLevel)
           cat << 'EOF' > lib/main.dart
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
@@ -96,7 +96,7 @@ jobs:
               await Permission.videos.request();
 
               player = Player(
-                configuration: const PlayerConfiguration(
+                configuration: PlayerConfiguration(
                   bufferSize: 32 * 1024 * 1024,
                   logLevel: LogLevel.none,
                 ),
@@ -150,7 +150,7 @@ jobs:
           }
           EOF
 
-          # 4. Patch minSdkVersion 21 for both Groovy and Kotlin DSL
+          # 4. Patch minSdkVersion 21
           find android/app -name "build.gradle*" -exec sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' {} +
 
