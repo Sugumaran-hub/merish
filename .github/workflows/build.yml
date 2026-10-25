@@ -36,8 +36,9 @@ jobs:
           flutter pub add media_kit_libs_android_video
           flutter pub add permission_handler
           flutter pub add path
+          flutter pub add shared_preferences
 
-          # 1. Native Kotlin Bridge (Hardware Thumbnails + Master Audio/Brightness Sync)
+          # 1. Native Kotlin Bridge (Zero-Crash Thumbnails + System Volume/Brightness Sync)
           cat << 'EOF' > android/app/src/main/kotlin/com/merish/player/merish/MainActivity.kt
           package com.merish.player.merish
 
@@ -69,18 +70,18 @@ jobs:
                               Thread {
                                   try {
                                       val cacheFile = File(cacheDir, "thumb_" + videoPath.hashCode() + ".jpg")
-                                      if (cacheFile.exists()) {
+                                      if (cacheFile.exists() && cacheFile.length() > 0) {
                                           runOnUiThread { result.success(cacheFile.absolutePath) }
                                           return@Thread
                                       }
                                       val retriever = MediaMetadataRetriever()
                                       retriever.setDataSource(videoPath)
-                                      val bitmap = retriever.getFrameAtTime(2000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                      val bitmap = retriever.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                                           ?: retriever.frameAtTime
                                       retriever.release()
                                       if (bitmap != null) {
                                           val fos = FileOutputStream(cacheFile)
-                                          bitmap.compress(Bitmap.CompressFormat.JPEG, 75, fos)
+                                          bitmap.compress(Bitmap.CompressFormat.JPEG, 70, fos)
                                           fos.flush()
                                           fos.close()
                                           runOnUiThread { result.success(cacheFile.absolutePath) }
@@ -96,7 +97,7 @@ jobs:
                               val vol = call.argument<Double>("volume") ?: 0.5
                               val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                               val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                              val targetVol = (vol * maxVol).toInt()
+                              val targetVol = (vol * maxVol).toInt().coerceIn(0, maxVol)
                               audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVol, 0)
                               result.success(true)
                           }
@@ -107,7 +108,7 @@ jobs:
                               result.success(curVol.toDouble() / maxVol.toDouble())
                           }
                           "setBrightness" -> {
-                              val brightness = call.argument<Double>("brightness")?.toFloat() ?: 0.5f
+                              val brightness = (call.argument<Double>("brightness")?.toFloat() ?: 0.5f).coerceIn(0.01f, 1.0f)
                               activity?.let {
                                   val layout = it.window.attributes
                                   layout.screenBrightness = brightness
@@ -133,7 +134,7 @@ jobs:
           }
           EOF
 
-          # 2. Master Flutter UI & Core Architecture
+          # 2. Master Flutter UI (All Folders Scanner + Grid/List View + White Screen Fix)
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:io';
@@ -143,12 +144,12 @@ jobs:
           import 'package:media_kit_video/media_kit_video.dart';
           import 'package:permission_handler/permission_handler.dart';
           import 'package:path/path.dart' as p;
+          import 'package:shared_preferences/shared_preferences.dart';
 
           const MethodChannel nativeChannel = MethodChannel('com.merish.player/native');
 
-          // Playback Resume Memory
           final Map<String, Duration> resumeMemory = {};
-          final Set<String> hiddenFolders = {};
+          Set<String> hiddenFolders = {};
 
           void main() async {
             WidgetsFlutterBinding.ensureInitialized();
@@ -180,7 +181,7 @@ jobs:
           }
 
           // ===========================================================================
-          // HIGH PERFORMANCE FOLDER BROWSER WITH NATIVE THUMBNAILS
+          // ALL-FOLDER SCANNER WITH GRID/LIST VIEW & HIDDEN MANAGER
           // ===========================================================================
           class FolderBrowserScreen extends StatefulWidget {
             const FolderBrowserScreen({super.key});
@@ -191,6 +192,8 @@ jobs:
 
           class _FolderBrowserScreenState extends State<FolderBrowserScreen> {
             bool isLoading = true;
+            bool isGridView = false;
+            String searchQuery = "";
             Map<String, List<File>> folderMap = {};
             final Map<String, String?> thumbnailCache = {};
 
@@ -202,10 +205,30 @@ jobs:
                 DeviceOrientation.landscapeLeft,
                 DeviceOrientation.landscapeRight,
               ]);
-              requestAndFastScan();
+              loadPrefsAndScan();
             }
 
-            Future<void> requestAndFastScan() async {
+            Future<void> loadPrefsAndScan() async {
+              final prefs = await SharedPreferences.getInstance();
+              final savedHidden = prefs.getStringList('hidden_folders') ?? [];
+              isGridView = prefs.getBool('is_grid_view') ?? false;
+              hiddenFolders = savedHidden.toSet();
+
+              await requestAndDeepScan();
+            }
+
+            Future<void> saveHiddenFolders() async {
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setStringList('hidden_folders', hiddenFolders.toList());
+            }
+
+            Future<void> toggleViewMode() async {
+              setState(() => isGridView = !isGridView);
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setBool('is_grid_view', isGridView);
+            }
+
+            Future<void> requestAndDeepScan() async {
               setState(() => isLoading = true);
 
               var status = await Permission.manageExternalStorage.request();
@@ -214,40 +237,64 @@ jobs:
                 await Permission.videos.request();
               }
 
-              await runScan();
+              await runDeepScan();
             }
 
-            Future<void> runScan() async {
+            // Scans ALL directories on device memory
+            Future<void> runDeepScan() async {
               folderMap.clear();
               final videoExts = {'.mp4', '.mkv', '.webm', '.avi', '.mov', '.ts', '.flv', '.wmv', '.m4v'};
-              final targetPaths = [
-                '/storage/emulated/0/DCIM/Camera',
-                '/storage/emulated/0/DCIM',
-                '/storage/emulated/0/Movies',
-                '/storage/emulated/0/Download',
-                '/storage/emulated/0/Download/Telegram',
-                '/storage/emulated/0/Telegram',
-                '/storage/emulated/0/WhatsApp/Media/WhatsApp Video',
-                '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video',
-              ];
+              final rootDir = Directory('/storage/emulated/0');
 
-              for (var tPath in targetPaths) {
-                final dir = Directory(tPath);
-                if (dir.existsSync()) {
-                  try {
-                    final list = dir.listSync(recursive: false);
-                    for (var entity in list) {
-                      if (entity is File) {
-                        final ext = p.extension(entity.path).toLowerCase();
-                        if (videoExts.contains(ext)) {
-                          final fullDir = p.dirname(entity.path);
-                          if (!hiddenFolders.contains(fullDir)) {
-                            folderMap.putIfAbsent(fullDir, () => []).add(entity);
-                          }
+              if (await rootDir.exists()) {
+                try {
+                  final entities = rootDir.listSync(recursive: true, followLinks: false);
+                  for (var entity in entities) {
+                    if (entity is File) {
+                      final pathLower = entity.path.toLowerCase();
+                      if (pathLower.contains('/android/data') || pathLower.contains('/android/obb') || pathLower.contains('/.')) {
+                        continue;
+                      }
+                      final ext = p.extension(entity.path).toLowerCase();
+                      if (videoExts.contains(ext)) {
+                        final parentDir = p.dirname(entity.path);
+                        if (!hiddenFolders.contains(parentDir)) {
+                          folderMap.putIfAbsent(parentDir, () => []).add(entity);
                         }
                       }
                     }
-                  } catch (_) {}
+                  }
+                } catch (_) {
+                  // Fallback explicit directories
+                  final directPaths = [
+                    '/storage/emulated/0/DCIM/Camera',
+                    '/storage/emulated/0/DCIM',
+                    '/storage/emulated/0/Movies',
+                    '/storage/emulated/0/Download',
+                    '/storage/emulated/0/Download/Telegram',
+                    '/storage/emulated/0/Telegram',
+                    '/storage/emulated/0/WhatsApp/Media/WhatsApp Video',
+                    '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video',
+                    '/storage/emulated/0/Pictures',
+                    '/storage/emulated/0/Bluetooth',
+                    '/storage/emulated/0/ShareMe',
+                  ];
+
+                  for (var dirPath in directPaths) {
+                    final d = Directory(dirPath);
+                    if (d.existsSync()) {
+                      try {
+                        for (var item in d.listSync(recursive: true)) {
+                          if (item is File && videoExts.contains(p.extension(item.path).toLowerCase())) {
+                            final parentDir = p.dirname(item.path);
+                            if (!hiddenFolders.contains(parentDir)) {
+                              folderMap.putIfAbsent(parentDir, () => []).add(item);
+                            }
+                          }
+                        }
+                      } catch (_) {}
+                    }
+                  }
                 }
               }
 
@@ -257,18 +304,16 @@ jobs:
 
               for (var fPath in folderMap.keys) {
                 if (folderMap[fPath]!.isNotEmpty && !thumbnailCache.containsKey(fPath)) {
-                  loadNativeThumb(folderMap[fPath]!.first.path, fPath);
+                  loadFolderThumb(folderMap[fPath]!.first.path, fPath);
                 }
               }
             }
 
-            Future<void> loadNativeThumb(String videoPath, String key) async {
+            Future<void> loadFolderThumb(String videoPath, String key) async {
               try {
                 final String? thumb = await nativeChannel.invokeMethod('getThumbnail', {'path': videoPath});
                 if (mounted && thumb != null) {
-                  setState(() {
-                    thumbnailCache[key] = thumb;
-                  });
+                  setState(() => thumbnailCache[key] = thumb);
                 }
               } catch (_) {}
             }
@@ -278,18 +323,21 @@ jobs:
                 hiddenFolders.add(folderPath);
                 folderMap.remove(folderPath);
               });
+              saveHiddenFolders();
+
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
-                  backgroundColor: const Color(0xFF161616),
-                  content: Text("Folder hidden: ${p.basename(folderPath)}", style: const TextStyle(color: Colors.white)),
+                  backgroundColor: const Color(0xFF141414),
+                  content: Text("Hidden: ${p.basename(folderPath)}", style: const TextStyle(color: Colors.white)),
                   action: SnackBarAction(
                     label: "UNDO",
                     textColor: const Color(0xFFFFB300),
                     onPressed: () {
                       setState(() {
                         hiddenFolders.remove(folderPath);
-                        runScan();
+                        runDeepScan();
                       });
+                      saveHiddenFolders();
                     },
                   ),
                 ),
@@ -327,8 +375,9 @@ jobs:
                                     onPressed: () {
                                       setState(() {
                                         hiddenFolders.clear();
-                                        runScan();
+                                        runDeepScan();
                                       });
+                                      saveHiddenFolders();
                                       Navigator.pop(context);
                                     },
                                     child: const Text("RESTORE ALL", style: TextStyle(color: Color(0xFFFFB300), fontWeight: FontWeight.bold)),
@@ -339,7 +388,7 @@ jobs:
                             contentPadding: EdgeInsets.zero,
                             leading: const Icon(Icons.memory_rounded, color: Colors.white70),
                             title: const Text("VPU Hardware Decoder", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                            subtitle: const Text("Snapdragon MediaCodec direct texture rendering", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                            subtitle: const Text("Direct Snapdragon MediaCodec surface pipeline", style: TextStyle(color: Colors.white54, fontSize: 12)),
                             trailing: const Text("AUTO (HW)", style: TextStyle(color: Color(0xFFFFB300), fontWeight: FontWeight.bold, fontSize: 12)),
                           ),
                         ],
@@ -352,6 +401,11 @@ jobs:
 
             @override
             Widget build(BuildContext context) {
+              final displayedFolders = folderMap.keys.where((k) {
+                final name = p.basename(k).toLowerCase();
+                return name.contains(searchQuery.toLowerCase());
+              }).toList();
+
               return Scaffold(
                 backgroundColor: Colors.black,
                 appBar: AppBar(
@@ -376,20 +430,24 @@ jobs:
                         ),
                       ),
                       const SizedBox(width: 14),
-                      const Text(
-                        "Library",
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, letterSpacing: 0.3),
+                      Text(
+                        "${displayedFolders.length} Folders",
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, letterSpacing: 0.3),
                       ),
                     ],
                   ),
                   actions: [
+                    IconButton(
+                      icon: Icon(isGridView ? Icons.view_list_rounded : Icons.grid_view_rounded, color: Colors.white70),
+                      onPressed: toggleViewMode,
+                    ),
                     IconButton(
                       icon: const Icon(Icons.settings_outlined, color: Colors.white70),
                       onPressed: showSettingsSheet,
                     ),
                     IconButton(
                       icon: const Icon(Icons.refresh_rounded, color: Color(0xFFFFB300)),
-                      onPressed: requestAndFastScan,
+                      onPressed: requestAndDeepScan,
                     ),
                   ],
                 ),
@@ -397,7 +455,7 @@ jobs:
                     ? const Center(
                         child: CircularProgressIndicator(color: Color(0xFFFFB300), strokeWidth: 2),
                       )
-                    : folderMap.isEmpty
+                    : displayedFolders.isEmpty
                         ? Center(
                             child: Padding(
                               padding: const EdgeInsets.all(28),
@@ -409,7 +467,7 @@ jobs:
                                   const Text("Storage Access Required", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
                                   const SizedBox(height: 8),
                                   const Text(
-                                    "Enable 'All Files Access' to let Merish index your folders and extract video thumbnails.",
+                                    "Tap below to grant 'All Files Access' so Merish can index every folder on your device.",
                                     textAlign: TextAlign.center,
                                     style: TextStyle(color: Colors.white54, fontSize: 13),
                                   ),
@@ -423,7 +481,7 @@ jobs:
                                     ),
                                     onPressed: () async {
                                       await Permission.manageExternalStorage.request();
-                                      requestAndFastScan();
+                                      requestAndDeepScan();
                                     },
                                     icon: const Icon(Icons.lock_open_rounded),
                                     label: const Text("Grant All Files Access", style: TextStyle(fontWeight: FontWeight.bold)),
@@ -432,103 +490,188 @@ jobs:
                               ),
                             ),
                           )
-                        : ListView.separated(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                            itemCount: folderMap.keys.length,
-                            separatorBuilder: (_, __) => const SizedBox(height: 12),
-                            itemBuilder: (context, index) {
-                              final folderPath = folderMap.keys.elementAt(index);
-                              final folderName = p.basename(folderPath);
-                              final files = folderMap[folderPath]!;
-                              final thumbFile = thumbnailCache[folderPath];
-
-                              return InkWell(
-                                borderRadius: BorderRadius.circular(14),
-                                onLongPress: () {
-                                  showDialog(
-                                    context: context,
-                                    builder: (ctx) => AlertDialog(
-                                      backgroundColor: const Color(0xFF141414),
-                                      title: Text("Hide $folderName?"),
-                                      content: const Text("This folder will be hidden from library view. You can restore it in settings anytime."),
-                                      actions: [
-                                        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("CANCEL", style: TextStyle(color: Colors.white54))),
-                                        TextButton(
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            hideFolder(folderPath);
-                                          },
-                                          child: const Text("HIDE", style: TextStyle(color: Color(0xFFFFB300), fontWeight: FontWeight.bold)),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                                onTap: () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => VideoListScreen(
-                                        folderName: folderName,
-                                        files: files,
-                                      ),
-                                    ),
-                                  );
-                                },
-                                child: Container(
-                                  padding: const EdgeInsets.all(12),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF0F0F0F),
-                                    borderRadius: BorderRadius.circular(14),
-                                    border: Border.all(color: Colors.white.withOpacity(0.07)),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(10),
-                                        child: Container(
-                                          width: 65,
-                                          height: 65,
-                                          color: Colors.black,
-                                          child: thumbFile != null && File(thumbFile).existsSync()
-                                              ? Image.file(File(thumbFile), fit: BoxFit.cover)
-                                              : const Icon(Icons.folder_rounded, color: Color(0xFFFFB300), size: 30),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 16),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              folderName,
-                                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
-                                            const SizedBox(height: 5),
-                                            Text(
-                                              "${files.length} Videos • $folderPath",
-                                              style: const TextStyle(color: Colors.white54, fontSize: 12),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white24, size: 16),
-                                    ],
-                                  ),
+                        : isGridView
+                            // 2-Column Luxury Grid View
+                            ? GridView.builder(
+                                padding: const EdgeInsets.all(14),
+                                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: 2,
+                                  crossAxisSpacing: 12,
+                                  mainAxisSpacing: 12,
+                                  childAspectRatio: 0.95,
                                 ),
-                              );
-                            },
-                          ),
+                                itemCount: displayedFolders.length,
+                                itemBuilder: (context, index) {
+                                  final folderPath = displayedFolders[index];
+                                  final folderName = p.basename(folderPath);
+                                  final files = folderMap[folderPath]!;
+                                  final thumb = thumbnailCache[folderPath];
+
+                                  return InkWell(
+                                    borderRadius: BorderRadius.circular(14),
+                                    onLongPress: () => hideFolder(folderPath),
+                                    onTap: () {
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (_) => VideoListScreen(folderName: folderName, files: files),
+                                        ),
+                                      );
+                                    },
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF0F0F0F),
+                                        borderRadius: BorderRadius.circular(14),
+                                        border: Border.all(color: Colors.white.withOpacity(0.08)),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Expanded(
+                                            child: ClipRRect(
+                                              borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+                                              child: Container(
+                                                width: double.infinity,
+                                                color: Colors.black,
+                                                child: thumb != null && File(thumb).existsSync()
+                                                    ? Image.file(File(thumb), fit: BoxFit.cover)
+                                                    : const Icon(Icons.folder_rounded, color: Color(0xFFFFB300), size: 40),
+                                              ),
+                                            ),
+                                          ),
+                                          Padding(
+                                            padding: const EdgeInsets.all(10),
+                                            child: Row(
+                                              children: [
+                                                Expanded(
+                                                  child: Column(
+                                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                                    children: [
+                                                      Text(
+                                                        folderName,
+                                                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow.ellipsis,
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        "${files.length} Videos",
+                                                        style: const TextStyle(color: Colors.white54, fontSize: 11),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                                PopupMenuButton<String>(
+                                                  color: const Color(0xFF161616),
+                                                  padding: EdgeInsets.zero,
+                                                  icon: const Icon(Icons.more_vert_rounded, color: Colors.white38, size: 18),
+                                                  onSelected: (val) {
+                                                    if (val == 'hide') hideFolder(folderPath);
+                                                  },
+                                                  itemBuilder: (ctx) => [
+                                                    const PopupMenuItem(
+                                                      value: 'hide',
+                                                      child: Text("Hide Folder", style: TextStyle(color: Colors.white, fontSize: 13)),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              )
+                            // Clean List View
+                            : ListView.separated(
+                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                itemCount: displayedFolders.length,
+                                separatorBuilder: (_, __) => const SizedBox(height: 12),
+                                itemBuilder: (context, index) {
+                                  final folderPath = displayedFolders[index];
+                                  final folderName = p.basename(folderPath);
+                                  final files = folderMap[folderPath]!;
+                                  final thumb = thumbnailCache[folderPath];
+
+                                  return InkWell(
+                                    borderRadius: BorderRadius.circular(14),
+                                    onLongPress: () => hideFolder(folderPath),
+                                    onTap: () {
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (_) => VideoListScreen(folderName: folderName, files: files),
+                                        ),
+                                      );
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF0F0F0F),
+                                        borderRadius: BorderRadius.circular(14),
+                                        border: Border.all(color: Colors.white.withOpacity(0.07)),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          ClipRRect(
+                                            borderRadius: BorderRadius.circular(10),
+                                            child: Container(
+                                              width: 65,
+                                              height: 65,
+                                              color: Colors.black,
+                                              child: thumb != null && File(thumb).existsSync()
+                                                  ? Image.file(File(thumb), fit: BoxFit.cover)
+                                                  : const Icon(Icons.folder_rounded, color: Color(0xFFFFB300), size: 30),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 16),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  folderName,
+                                                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  "${files.length} Videos • $folderPath",
+                                                  style: const TextStyle(color: Colors.white54, fontSize: 11),
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          PopupMenuButton<String>(
+                                            color: const Color(0xFF161616),
+                                            icon: const Icon(Icons.more_vert_rounded, color: Colors.white38, size: 20),
+                                            onSelected: (val) {
+                                              if (val == 'hide') hideFolder(folderPath);
+                                            },
+                                            itemBuilder: (ctx) => [
+                                              const PopupMenuItem(
+                                                value: 'hide',
+                                                child: Text("Hide Folder", style: TextStyle(color: Colors.white, fontSize: 13)),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
               );
             }
           }
 
           // ===========================================================================
-          // VIDEO LIST SCREEN WITH NATIVE THUMBNAILS
+          // VIDEO LIST SCREEN
           // ===========================================================================
           class VideoListScreen extends StatefulWidget {
             final String folderName;
@@ -547,17 +690,15 @@ jobs:
             void initState() {
               super.initState();
               for (var f in widget.files) {
-                loadNativeThumb(f.path);
+                loadThumb(f.path);
               }
             }
 
-            Future<void> loadNativeThumb(String videoPath) async {
+            Future<void> loadThumb(String videoPath) async {
               try {
                 final String? thumb = await nativeChannel.invokeMethod('getThumbnail', {'path': videoPath});
                 if (mounted && thumb != null) {
-                  setState(() {
-                    videoThumbs[videoPath] = thumb;
-                  });
+                  setState(() => videoThumbs[videoPath] = thumb);
                 }
               } catch (_) {}
             }
@@ -670,7 +811,7 @@ jobs:
           }
 
           // ===========================================================================
-          // MASTER ROYAL PLAYER (AUTO-PLAY, AUTO-RESUME, SYSTEM SYNC, NATIVE HUD)
+          // MASTER ROYAL PLAYER (NO WHITE-SCREEN + NATIVE VPU PIPELINE)
           // ===========================================================================
           class MasterPlayerScreen extends StatefulWidget {
             final List<File> playlist;
@@ -693,6 +834,7 @@ jobs:
             bool isControlsVisible = true;
             bool isHW = true;
             bool isLocked = false;
+            bool isVideoReady = false;
             BoxFit currentFit = BoxFit.contain;
             String fitLabel = "FIT";
 
@@ -740,6 +882,7 @@ jobs:
                 ),
               );
 
+              // Direct Hardware Acceleration with white-screen prevention
               controller = VideoController(
                 player,
                 configuration: const VideoControllerConfiguration(
@@ -748,8 +891,12 @@ jobs:
                 ),
               );
 
+              // Auto Screen Orientation based on Video Aspect Ratio
               player.stream.videoParams.listen((params) {
                 if (params.w != null && params.h != null && params.w! > 0 && params.h! > 0) {
+                  if (mounted && !isVideoReady) {
+                    setState(() => isVideoReady = true);
+                  }
                   if (params.w! >= params.h!) {
                     SystemChrome.setPreferredOrientations([
                       DeviceOrientation.landscapeLeft,
@@ -763,6 +910,7 @@ jobs:
                 }
               });
 
+              // Auto-Play Next
               player.stream.completed.listen((completed) {
                 if (completed && activeIndex < widget.playlist.length - 1) {
                   playNext();
@@ -773,11 +921,12 @@ jobs:
             }
 
             void playCurrentIndex() {
+              setState(() => isVideoReady = false);
               final filePath = widget.playlist[activeIndex].path;
               player.open(Media(filePath));
 
               if (resumeMemory.containsKey(filePath) && resumeMemory[filePath]!.inSeconds > 5) {
-                Future.delayed(const Duration(milliseconds: 300), () {
+                Future.delayed(const Duration(milliseconds: 350), () {
                   player.seek(resumeMemory[filePath]!);
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -874,10 +1023,10 @@ jobs:
                         ),
                         const Divider(color: Colors.white12, height: 20),
                         _infoRow("File Name", p.basename(curFile.path)),
-                        _infoRow("Resolution", w > 0 ? "$w x $h (16:9 HD/4K)" : "Native Display"),
+                        _infoRow("Resolution", w > 0 ? "$w x $h" : "Detecting..."),
                         _infoRow("Duration", dur),
                         _infoRow("File Size", "$sizeMB MB"),
-                        _infoRow("VPU Pipeline", "Snapdragon Hardware Direct (0% Heating)"),
+                        _infoRow("VPU Engine", "Snapdragon Hardware Direct (0% Heating)"),
                         _infoRow("Buffer Cap", "Strict 32 MB Memory Cap"),
                         _infoRow("Active Audio", player.state.track.audio.id),
                         _infoRow("Active Subtitle", player.state.track.subtitle.id),
@@ -967,6 +1116,7 @@ jobs:
                   },
                   child: Stack(
                     children: [
+                      // Video Surface
                       Center(
                         child: Video(
                           controller: controller,
@@ -974,6 +1124,16 @@ jobs:
                           controls: NoVideoControls,
                         ),
                       ),
+
+                      // Dark loading fallback to prevent white screen flash
+                      if (!isVideoReady)
+                        Container(
+                          color: Colors.black,
+                          child: const Center(
+                            child: CircularProgressIndicator(color: Color(0xFFFFB300), strokeWidth: 2),
+                          ),
+                        ),
+
                       if (showSeekRipple)
                         Positioned(
                           top: h / 2 - 40,
@@ -994,6 +1154,7 @@ jobs:
                             ),
                           ),
                         ),
+
                       if (showHud)
                         Center(
                           child: Container(
@@ -1020,6 +1181,7 @@ jobs:
                             ),
                           ),
                         ),
+
                       if (isControlsVisible && !isLocked)
                         Positioned(
                           top: 24,
@@ -1060,6 +1222,7 @@ jobs:
                             ],
                           ),
                         ),
+
                       if (isLocked)
                         Positioned(
                           left: 16,
@@ -1072,6 +1235,7 @@ jobs:
                             ),
                           ),
                         ),
+
                       if (isControlsVisible && !isLocked)
                         Positioned(
                           bottom: 24,
@@ -1189,7 +1353,7 @@ jobs:
           }
           EOF
 
-          # Inject Scoped Storage & MANAGE_EXTERNAL_STORAGE Permissions
+          # Permissions
           sed -i '/<manifest/a \    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />' android/app/src/main/AndroidManifest.xml
           sed -i 's/android:label="merish"/android:label="Merish"/g' android/app/src/main/AndroidManifest.xml
 
@@ -1222,7 +1386,7 @@ jobs:
                       f.write(b)
           "
 
-          # Fix SDK 37 & MinSDK 21 configs
+          # Fix SDK configs
           find android/app -name "build.gradle*" -exec sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 37/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 37/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' {} +
