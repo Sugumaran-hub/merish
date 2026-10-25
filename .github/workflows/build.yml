@@ -24,24 +24,20 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Build Merish App
+      - name: Build Merish APK Cleanly
         run: |
-          # 1. Clean workspace completely
-          cd /tmp
-          flutter create --org com.merish.player --project-name merish merish_app
-          cd merish_app
+          # 1. Fresh pure Flutter project
+          rm -rf /tmp/merish_app
+          flutter create --org com.merish.player --project-name merish /tmp/merish_app
+          cd /tmp/merish_app
 
-          # 2. Add dependencies cleanly
+          # 2. Add dependencies
           flutter pub add media_kit
           flutter pub add media_kit_video
           flutter pub add media_kit_libs_android_video
           flutter pub add permission_handler
 
-          # 3. Patch minSdkVersion to 21 (strictly required by media_kit/libmpv)
-          sed -i 's/minSdkVersion = flutter.minSdkVersion/minSdkVersion = 21/g' android/app/build.gradle
-          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
-
-          # 4. Inject Core Player Code
+          # 3. Inject our pure AMOLED hardware engine
           cat << 'EOF' > lib/main.dart
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
@@ -154,14 +150,21 @@ jobs:
           }
           EOF
 
-          # 5. Add Hardware Acceleration & Permissions
-          sed -i '/<application/a \        android:hardwareAccelerated="true"' android/app/src/main/AndroidManifest.xml
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />' android/app/src/main/AndroidManifest.xml
+          # 4. Safe minSdkVersion update without breaking Gradle syntax
+          python3 -c "
+          p = 'android/app/build.gradle'
+          with open(p, 'r') as f:
+              content = f.read()
+          content = content.replace('minSdkVersion = flutter.minSdkVersion', 'minSdkVersion = 21')
+          content = content.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 21')
+          with open(p, 'w') as f:
+              f.write(content)
+          "
 
-          # 6. Build Snapdragon ARM64 APK
+          # 5. Build Snapdragon ARM64 APK
           flutter build apk --split-per-abi --release
 
-          # 7. Collect APK to repository artifact folder
+          # 6. Copy output
           mkdir -p $GITHUB_WORKSPACE/output
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk $GITHUB_WORKSPACE/output/merish-arm64-v8a.apk
 
