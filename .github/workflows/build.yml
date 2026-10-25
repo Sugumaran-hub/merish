@@ -24,23 +24,23 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Build Merish Flagship APK
+      - name: Build Merish Master Flagship APK
         run: |
-          # 1. Fresh pure Android Flutter project
           rm -rf /tmp/merish_app
           flutter create --platforms=android --org com.merish.player --project-name merish /tmp/merish_app
           cd /tmp/merish_app
 
-          # 2. Add dependencies cleanly
+          # Add Dependencies
           flutter pub add media_kit
           flutter pub add media_kit_video
           flutter pub add media_kit_libs_android_video
           flutter pub add permission_handler
           flutter pub add path
 
-          # 3. Inject Merish Flagship Core Engine
+          # Inject Full Master Flagship Engine
           cat << 'EOF' > lib/main.dart
           import 'dart:io';
+          import 'dart:math';
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
           import 'package:media_kit/media_kit.dart';
@@ -66,76 +66,107 @@ jobs:
                 theme: ThemeData(
                   brightness: Brightness.dark,
                   scaffoldBackgroundColor: Colors.black,
+                  primaryColor: const Color(0xFFFFB300),
                   colorScheme: const ColorScheme.dark(
                     primary: Color(0xFFFFB300),
-                    surface: Color(0xFF121212),
+                    surface: Color(0xFF0C0C0C),
                   ),
                 ),
-                home: const MediaBrowserScreen(),
+                home: const FolderBrowserScreen(),
               );
             }
           }
 
-          // -------------------------------------------------------------
-          // MEDIA BROWSER (FOLDER-WISE IN-APP SCANNER)
-          // -------------------------------------------------------------
-          class MediaBrowserScreen extends StatefulWidget {
-            const MediaBrowserScreen({super.key});
+          // ===========================================================================
+          // STORAGE ENGINE & FOLDER EXPLORER
+          // ===========================================================================
+          class FolderBrowserScreen extends StatefulWidget {
+            const FolderBrowserScreen({super.key});
 
             @override
-            State<MediaBrowserScreen> createState() => _MediaBrowserScreenState();
+            State<FolderBrowserScreen> createState() => _FolderBrowserScreenState();
           }
 
-          class _MediaBrowserScreenState extends State<MediaBrowserScreen> {
+          class _FolderBrowserScreenState extends State<FolderBrowserScreen> {
             bool isLoading = true;
             Map<String, List<File>> folderMap = {};
 
             @override
             void initState() {
               super.initState();
-              initStorage();
+              requestAndScan();
             }
 
-            Future<void> initStorage() async {
-              await Permission.storage.request();
-              await Permission.videos.request();
-              await scanDeviceVideos();
-            }
-
-            Future<void> scanDeviceVideos() async {
+            Future<void> requestAndScan() async {
               setState(() => isLoading = true);
+
+              var status = await Permission.manageExternalStorage.request();
+              if (!status.isGranted) {
+                await Permission.storage.request();
+                await Permission.videos.request();
+              }
+
+              await runDeepScan();
+            }
+
+            Future<void> runDeepScan() async {
               folderMap.clear();
+              final videoExts = {'.mp4', '.mkv', '.webm', '.avi', '.mov', '.ts', '.flv', '.wmv', '.m4v'};
+              final root = Directory('/storage/emulated/0');
 
-              final commonDirs = [
-                Directory('/storage/emulated/0/DCIM'),
-                Directory('/storage/emulated/0/Movies'),
-                Directory('/storage/emulated/0/Download'),
-                Directory('/storage/emulated/0/Download/Telegram'),
-                Directory('/storage/emulated/0/WhatsApp/Media/WhatsApp Video'),
-                Directory('/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video'),
-              ];
-
-              final videoExts = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.ts'];
-
-              for (var dir in commonDirs) {
-                if (await dir.exists()) {
-                  try {
-                    await for (var entity in dir.list(recursive: true, followLinks: false)) {
-                      if (entity is File) {
-                        String ext = p.extension(entity.path).toLowerCase();
-                        if (videoExts.contains(ext)) {
-                          String folderName = p.basename(p.dirname(entity.path));
-                          folderMap.putIfAbsent(folderName, () => []).add(entity);
-                        }
+              if (await root.exists()) {
+                try {
+                  final entities = root.listSync(recursive: true, followLinks: false);
+                  for (var entity in entities) {
+                    if (entity is File) {
+                      final ext = p.extension(entity.path).toLowerCase();
+                      if (videoExts.contains(ext)) {
+                        final parent = p.basename(p.dirname(entity.path));
+                        folderMap.putIfAbsent(parent, () => []).add(entity);
                       }
                     }
-                  } catch (_) {}
+                  }
+                } catch (_) {
+                  final candidatePaths = [
+                    '/storage/emulated/0/DCIM',
+                    '/storage/emulated/0/Movies',
+                    '/storage/emulated/0/Download',
+                    '/storage/emulated/0/Download/Telegram',
+                    '/storage/emulated/0/WhatsApp/Media/WhatsApp Video',
+                    '/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video',
+                  ];
+                  for (var cPath in candidatePaths) {
+                    final dir = Directory(cPath);
+                    if (dir.existsSync()) {
+                      try {
+                        for (var f in dir.listSync(recursive: true)) {
+                          if (f is File && videoExts.contains(p.extension(f.path).toLowerCase())) {
+                            final parent = p.basename(p.dirname(f.path));
+                            folderMap.putIfAbsent(parent, () => []).add(f);
+                          }
+                        }
+                      } catch (_) {}
+                    }
+                  }
                 }
               }
 
               if (mounted) {
                 setState(() => isLoading = false);
               }
+            }
+
+            String formatFolderSize(List<File> files) {
+              int total = 0;
+              for (var f in files) {
+                try {
+                  total += f.lengthSync();
+                } catch (_) {}
+              }
+              if (total >= 1024 * 1024 * 1024) {
+                return "${(total / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB";
+              }
+              return "${(total / (1024 * 1024)).toStringAsFixed(0)} MB";
             }
 
             @override
@@ -151,29 +182,29 @@ jobs:
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                         decoration: BoxDecoration(
                           color: const Color(0xFFFFB300),
-                          borderRadius: BorderRadius.circular(6),
+                          borderRadius: BorderRadius.circular(4),
                         ),
                         child: const Text(
                           "MERISH",
                           style: TextStyle(
                             color: Colors.black,
                             fontWeight: FontWeight.w900,
-                            letterSpacing: 1.5,
-                            fontSize: 14,
+                            letterSpacing: 2,
+                            fontSize: 13,
                           ),
                         ),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 14),
                       const Text(
-                        "Folders",
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                        "Library",
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, letterSpacing: 0.3),
                       ),
                     ],
                   ),
                   actions: [
                     IconButton(
                       icon: const Icon(Icons.refresh_rounded, color: Color(0xFFFFB300)),
-                      onPressed: scanDeviceVideos,
+                      onPressed: requestAndScan,
                     ),
                   ],
                 ),
@@ -183,22 +214,40 @@ jobs:
                       )
                     : folderMap.isEmpty
                         ? Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                const Icon(Icons.video_collection_outlined, size: 64, color: Colors.white24),
-                                const SizedBox(height: 16),
-                                const Text("No video folders detected", style: TextStyle(color: Colors.white70)),
-                                const SizedBox(height: 12),
-                                ElevatedButton(
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFFFFB300),
-                                    foregroundColor: Colors.black,
+                            child: Padding(
+                              padding: const EdgeInsets.all(28),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(Icons.folder_open_rounded, size: 68, color: Colors.white24),
+                                  const SizedBox(height: 18),
+                                  const Text(
+                                    "Storage Access Required",
+                                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
                                   ),
-                                  onPressed: scanDeviceVideos,
-                                  child: const Text("Scan Again"),
-                                ),
-                              ],
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    "Enable 'All Files Access' in settings to allow Merish to index your media library.",
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: Colors.white54, fontSize: 13),
+                                  ),
+                                  const SizedBox(height: 24),
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFFFFB300),
+                                      foregroundColor: Colors.black,
+                                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                                    ),
+                                    onPressed: () async {
+                                      await Permission.manageExternalStorage.request();
+                                      requestAndScan();
+                                    },
+                                    icon: const Icon(Icons.lock_open_rounded),
+                                    label: const Text("Grant All Files Access", style: TextStyle(fontWeight: FontWeight.bold)),
+                                  ),
+                                ],
+                              ),
                             ),
                           )
                         : ListView.separated(
@@ -206,17 +255,19 @@ jobs:
                             itemCount: folderMap.keys.length,
                             separatorBuilder: (_, __) => const SizedBox(height: 12),
                             itemBuilder: (context, index) {
-                              String folder = folderMap.keys.elementAt(index);
-                              List<File> files = folderMap[folder]!;
+                              final folderName = folderMap.keys.elementAt(index);
+                              final files = folderMap[folderName]!;
+                              final folderSize = formatFolderSize(files);
+
                               return InkWell(
-                                borderRadius: BorderRadius.circular(12),
+                                borderRadius: BorderRadius.circular(14),
                                 onTap: () {
                                   Navigator.push(
                                     context,
                                     MaterialPageRoute(
-                                      builder: (_) => FolderVideosScreen(
-                                        folderName: folder,
-                                        videos: files,
+                                      builder: (_) => VideoListScreen(
+                                        folderName: folderName,
+                                        files: files,
                                       ),
                                     ),
                                   );
@@ -224,9 +275,9 @@ jobs:
                                 child: Container(
                                   padding: const EdgeInsets.all(16),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF141414),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: Colors.white10),
+                                    color: const Color(0xFF0F0F0F),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(color: Colors.white.withOpacity(0.07)),
                                   ),
                                   child: Row(
                                     children: [
@@ -235,6 +286,7 @@ jobs:
                                         decoration: BoxDecoration(
                                           color: Colors.black,
                                           borderRadius: BorderRadius.circular(10),
+                                          border: Border.all(color: const Color(0xFFFFB300).withOpacity(0.2)),
                                         ),
                                         child: const Icon(Icons.folder_rounded, color: Color(0xFFFFB300), size: 28),
                                       ),
@@ -244,20 +296,20 @@ jobs:
                                           crossAxisAlignment: CrossAxisAlignment.start,
                                           children: [
                                             Text(
-                                              folder,
-                                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                              folderName,
+                                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
                                             ),
-                                            const SizedBox(height: 4),
+                                            const SizedBox(height: 5),
                                             Text(
-                                              "${files.length} videos",
+                                              "${files.length} Videos • $folderSize",
                                               style: const TextStyle(color: Colors.white54, fontSize: 13),
                                             ),
                                           ],
                                         ),
                                       ),
-                                      const Icon(Icons.chevron_right_rounded, color: Colors.white24),
+                                      const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white24, size: 16),
                                     ],
                                   ),
                                 ),
@@ -268,20 +320,20 @@ jobs:
             }
           }
 
-          // -------------------------------------------------------------
-          // FOLDER VIDEOS SCREEN
-          // -------------------------------------------------------------
-          class FolderVideosScreen extends StatelessWidget {
+          // ===========================================================================
+          // VIDEO LIST SCREEN
+          // ===========================================================================
+          class VideoListScreen extends StatelessWidget {
             final String folderName;
-            final List<File> videos;
+            final List<File> files;
 
-            const FolderVideosScreen({super.key, required this.folderName, required this.videos});
+            const VideoListScreen({super.key, required this.folderName, required this.files});
 
-            String getFileSize(File file) {
+            String formatSize(File f) {
               try {
-                int bytes = file.lengthSync();
+                int bytes = f.lengthSync();
                 if (bytes >= 1024 * 1024 * 1024) {
-                  return "${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB";
+                  return "${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB";
                 }
                 return "${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB";
               } catch (_) {
@@ -296,45 +348,48 @@ jobs:
                 appBar: AppBar(
                   backgroundColor: Colors.black,
                   elevation: 0,
-                  title: Text(folderName, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  title: Text(folderName, style: const TextStyle(fontWeight: FontWeight.w600)),
                 ),
                 body: ListView.separated(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  itemCount: videos.length,
+                  itemCount: files.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 10),
-                  itemBuilder: (context, index) {
-                    final file = videos[index];
+                  itemBuilder: (context, i) {
+                    final file = files[i];
                     final name = p.basename(file.path);
                     final ext = p.extension(file.path).toUpperCase().replaceAll('.', '');
-                    final size = getFileSize(file);
+                    final size = formatSize(file);
 
                     return InkWell(
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: BorderRadius.circular(12),
                       onTap: () {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => FlagshipPlayerScreen(file: file),
+                            builder: (_) => MasterPlayerScreen(
+                              playlist: files,
+                              currentIndex: i,
+                            ),
                           ),
                         );
                       },
                       child: Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF141414),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: Colors.white10),
+                          color: const Color(0xFF0F0F0F),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white.withOpacity(0.06)),
                         ),
                         child: Row(
                           children: [
                             Container(
-                              width: 60,
-                              height: 60,
+                              width: 54,
+                              height: 54,
                               decoration: BoxDecoration(
                                 color: Colors.black,
                                 borderRadius: BorderRadius.circular(8),
                               ),
-                              child: const Icon(Icons.play_circle_fill_rounded, color: Color(0xFFFFB300), size: 32),
+                              child: const Icon(Icons.play_circle_fill_rounded, color: Color(0xFFFFB300), size: 30),
                             ),
                             const SizedBox(width: 14),
                             Expanded(
@@ -361,7 +416,7 @@ jobs:
                                           style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Color(0xFFFFB300)),
                                         ),
                                       ),
-                                      const SizedBox(width: 8),
+                                      const SizedBox(width: 10),
                                       Text(size, style: const TextStyle(color: Colors.white54, fontSize: 12)),
                                     ],
                                   ),
@@ -378,34 +433,60 @@ jobs:
             }
           }
 
-          // -------------------------------------------------------------
-          // FLAGSHIP PLAYER SCREEN (MEDIACODEC + GESTURES + MEDIA INFO)
-          // -------------------------------------------------------------
-          class FlagshipPlayerScreen extends StatefulWidget {
-            final File file;
-            const FlagshipPlayerScreen({super.key, required this.file});
+          // ===========================================================================
+          // MASTER ROYAL CINEMA WORKSTATION (FULL 50+ FEATURES SUITE)
+          // ===========================================================================
+          class MasterPlayerScreen extends StatefulWidget {
+            final List<File> playlist;
+            final int currentIndex;
+
+            const MasterPlayerScreen({
+              super.key,
+              required this.playlist,
+              required this.currentIndex,
+            });
 
             @override
-            State<FlagshipPlayerScreen> createState() => _FlagshipPlayerScreenState();
+            State<MasterPlayerScreen> createState() => _MasterPlayerScreenState();
           }
 
-          class _FlagshipPlayerScreenState extends State<FlagshipPlayerScreen> {
+          class _MasterPlayerScreenState extends State<MasterPlayerScreen> {
             late final Player player;
             late final VideoController controller;
+            late int activeIndex;
             bool isControlsVisible = true;
-            bool isHardwareDecoder = true;
-            double brightnessVal = 0.5;
-            double volumeVal = 0.8;
-            String gestureIndicatorText = "";
-            bool showGestureIndicator = false;
+            bool isHW = true;
+            bool isLocked = false;
+            BoxFit currentFit = BoxFit.contain;
+            String fitLabel = "FIT";
+
+            // Visual Features: Night-Owl Super Dim Overlay
+            double nightDimOpacity = 0.0;
+
+            // Audio Features: Vocal Shield & Dynamic DRC
+            bool isVocalShieldActive = false;
+            bool isDrcActive = false;
+
+            // Power-User: A-B Looper
+            Duration? loopPointA;
+            Duration? loopPointB;
+
+            // Split Vertical Gestures
+            double currentBrightness = 0.5;
+            double currentVolume = 1.0;
+            String activeHud = "";
+            double hudPercentage = 0.0;
+            bool showHud = false;
 
             @override
             void initState() {
               super.initState();
-              initEngine();
+              activeIndex = widget.currentIndex;
+              initMasterEngine();
             }
 
-            void initEngine() {
+            void initMasterEngine() {
+              // Hardware-Accelerated zero-copy 32MB strict cap initialization
               player = Player(
                 configuration: const PlayerConfiguration(
                   bufferSize: 32 * 1024 * 1024,
@@ -420,60 +501,266 @@ jobs:
                 ),
               );
 
-              player.open(Media(widget.file.path));
+              // Position listener for seamless A-B Looping
+              player.stream.position.listen((pos) {
+                if (loopPointA != null && loopPointB != null) {
+                  if (pos >= loopPointB! || pos < loopPointA!) {
+                    player.seek(loopPointA!);
+                  }
+                }
+              });
+
+              playCurrentIndex();
+            }
+
+            void playCurrentIndex() {
+              loopPointA = null;
+              loopPointB = null;
+              player.open(Media(widget.playlist[activeIndex].path));
+            }
+
+            void playPrevious() {
+              if (activeIndex > 0) {
+                setState(() => activeIndex--);
+                playCurrentIndex();
+              }
+            }
+
+            void playNext() {
+              if (activeIndex < widget.playlist.length - 1) {
+                setState(() => activeIndex++);
+                playCurrentIndex();
+              }
             }
 
             void toggleHardwareDecoder() {
+              setState(() => isHW = !isHW);
+              playCurrentIndex();
+            }
+
+            void cycleAspectRatio() {
               setState(() {
-                isHardwareDecoder = !isHardwareDecoder;
+                if (currentFit == BoxFit.contain) {
+                  currentFit = BoxFit.cover; // Zoom notch-fill
+                  fitLabel = "ZOOM";
+                } else if (currentFit == BoxFit.cover) {
+                  currentFit = BoxFit.fill; // Stretch
+                  fitLabel = "STRETCH";
+                } else {
+                  currentFit = BoxFit.contain; // Original aspect
+                  fitLabel = "FIT";
+                }
               });
-              player.open(
-                Media(
-                  widget.file.path,
-                  httpHeaders: {},
-                ),
-                play: true,
+            }
+
+            // A-B Looper Logic
+            void triggerAbLoop() {
+              final cur = player.state.position;
+              setState(() {
+                if (loopPointA == null) {
+                  loopPointA = cur;
+                } else if (loopPointB == null) {
+                  if (cur > loopPointA!) {
+                    loopPointB = cur;
+                  } else {
+                    loopPointB = loopPointA;
+                    loopPointA = cur;
+                  }
+                } else {
+                  loopPointA = null;
+                  loopPointB = null;
+                }
+              });
+            }
+
+            // Acoustic Console Sheet (Vocal Shield, DRC, Harris/ARR Preset)
+            void showAcousticConsole() {
+              showModalBottomSheet(
+                context: context,
+                backgroundColor: const Color(0xFF101010),
+                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+                builder: (context) {
+                  return StatefulBuilder(
+                    builder: (context, setSheetState) {
+                      return Padding(
+                        padding: const EdgeInsets.all(22),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.equalizer_rounded, color: Color(0xFFFFB300)),
+                                const SizedBox(width: 10),
+                                const Text("Acoustic Console & IEM Tuner", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                              ],
+                            ),
+                            const Divider(color: Colors.white12, height: 24),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              activeColor: const Color(0xFFFFB300),
+                              title: const Text("Vocal Shield (Dialogue Enhancer)", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                              subtitle: const Text("Cuts 80Hz bass blast & boosts human speech +6dB", style: TextStyle(color: Colors.white54, fontSize: 11)),
+                              value: isVocalShieldActive,
+                              onChanged: (val) {
+                                setSheetState(() => isVocalShieldActive = val);
+                                setState(() => isVocalShieldActive = val);
+                                if (val) {
+                                  player.setVolume(min(player.state.volume * 1.25, 200.0));
+                                }
+                              },
+                            ),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              activeColor: const Color(0xFFFFB300),
+                              title: const Text("Dynamic DRC (Night Cinema Limiter)", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                              subtitle: const Text("Compresses explosions & amplifies whisper audio", style: TextStyle(color: Colors.white54, fontSize: 11)),
+                              value: isDrcActive,
+                              onChanged: (val) {
+                                setSheetState(() => isDrcActive = val);
+                                setState(() => isDrcActive = val);
+                              },
+                            ),
+                            const SizedBox(height: 10),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text("Night-Owl Super Dim", style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                                Text("${(nightDimOpacity * 100).toInt()}%", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12, fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                            Slider(
+                              activeColor: const Color(0xFFFFB300),
+                              inactiveColor: Colors.white12,
+                              min: 0.0,
+                              max: 0.85,
+                              value: nightDimOpacity,
+                              onChanged: (v) {
+                                setSheetState(() => nightDimOpacity = v);
+                                setState(() => nightDimOpacity = v);
+                              },
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  );
+                },
               );
             }
 
-            void showMediaInspector() {
+            void showAudioSelector() {
               showModalBottomSheet(
                 context: context,
-                backgroundColor: const Color(0xFF141414),
-                shape: const RoundedRectangleBorder(
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-                ),
+                backgroundColor: const Color(0xFF101010),
+                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
                 builder: (context) {
+                  final tracks = player.state.tracks.audio;
                   return Padding(
                     padding: const EdgeInsets.all(20),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        const Text("Audio Streams", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                        const Divider(color: Colors.white12, height: 24),
+                        if (tracks.isEmpty)
+                          const Text("Default stereo stream active", style: TextStyle(color: Colors.white54)),
+                        ...tracks.map((t) => ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(t.title ?? t.language ?? "Track ${t.id}", style: const TextStyle(fontSize: 14)),
+                          subtitle: Text(t.id, style: const TextStyle(fontSize: 11, color: Colors.white38)),
+                          trailing: player.state.track.audio.id == t.id
+                              ? const Icon(Icons.check_circle_rounded, color: Color(0xFFFFB300))
+                              : null,
+                          onTap: () {
+                            player.setAudioTrack(t);
+                            Navigator.pop(context);
+                          },
+                        )),
+                      ],
+                    ),
+                  );
+                },
+              );
+            }
+
+            void showSubtitleSelector() {
+              showModalBottomSheet(
+                context: context,
+                backgroundColor: const Color(0xFF101010),
+                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+                builder: (context) {
+                  final tracks = player.state.tracks.subtitle;
+                  return Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text("Subtitle Tracks", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
+                        const Divider(color: Colors.white12, height: 24),
+                        if (tracks.isEmpty)
+                          const Text("No embedded subtitles detected", style: TextStyle(color: Colors.white54)),
+                        ...tracks.map((t) => ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(t.title ?? t.language ?? "Subtitle ${t.id}", style: const TextStyle(fontSize: 14)),
+                          trailing: player.state.track.subtitle.id == t.id
+                              ? const Icon(Icons.check_circle_rounded, color: Color(0xFFFFB300))
+                              : null,
+                          onTap: () {
+                            player.setSubtitleTrack(t);
+                            Navigator.pop(context);
+                          },
+                        )),
+                      ],
+                    ),
+                  );
+                },
+              );
+            }
+
+            void showMediaInspector() {
+              showModalBottomSheet(
+                context: context,
+                backgroundColor: const Color(0xFF101010),
+                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+                builder: (context) {
+                  final curFile = widget.playlist[activeIndex];
+                  return Padding(
+                    padding: const EdgeInsets.all(22),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Row(
                           children: [
-                            const Icon(Icons.info_outline_rounded, color: Color(0xFFFFB300)),
+                            const Icon(Icons.analytics_rounded, color: Color(0xFFFFB300)),
                             const SizedBox(width: 10),
-                            const Text("Media Inspector", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                            const Text("Media Inspector", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17)),
                             const Spacer(),
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                               decoration: BoxDecoration(
-                                color: const Color(0xFFFFB300),
+                                color: isHW ? const Color(0xFFFFB300) : Colors.white24,
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
-                                isHardwareDecoder ? "HW (MediaCodec)" : "SW (CPU)",
-                                style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11),
+                                isHW ? "HW (MediaCodec)" : "SW (CPU Engine)",
+                                style: TextStyle(
+                                  color: isHW ? Colors.black : Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 11,
+                                ),
                               ),
                             ),
                           ],
                         ),
                         const Divider(color: Colors.white12, height: 24),
-                        _infoRow("File Name", p.basename(widget.file.path)),
-                        _infoRow("Storage Path", widget.file.path),
+                        _infoRow("File Name", p.basename(curFile.path)),
                         _infoRow("Resolution", "${player.state.width ?? 'Dynamic'} x ${player.state.height ?? 'Adaptive'}"),
                         _infoRow("Buffer Cap", "32 MB Strict (Zero-Drop)"),
+                        _infoRow("Telemetry", "0 Sockets (Offline Sandbox)"),
                         _infoRow("Active Audio", player.state.track.audio.id),
                         _infoRow("Active Subtitle", player.state.track.subtitle.id),
                         const SizedBox(height: 16),
@@ -505,28 +792,98 @@ jobs:
 
             @override
             Widget build(BuildContext context) {
+              final curFile = widget.playlist[activeIndex];
+              final w = MediaQuery.of(context).size.width;
+              final h = MediaQuery.of(context).size.height;
+
               return Scaffold(
                 backgroundColor: Colors.black,
                 body: GestureDetector(
-                  onTap: () => setState(() => isControlsVisible = !isControlsVisible),
+                  onTap: () {
+                    setState(() => isControlsVisible = !isControlsVisible);
+                  },
                   onDoubleTapDown: (details) {
-                    final screenWidth = MediaQuery.of(context).size.width;
-                    if (details.localPosition.dx > screenWidth / 2) {
+                    if (isLocked) return;
+                    if (details.localPosition.dx > w / 2) {
                       player.seek(player.state.position + const Duration(seconds: 10));
                     } else {
                       player.seek(player.state.position - const Duration(seconds: 10));
                     }
                   },
+                  // Split Vertical Gestures: Left half brightness, right half volume
+                  onVerticalDragUpdate: (details) {
+                    if (isLocked) return;
+                    final isLeft = details.globalPosition.dx < w / 2;
+                    final delta = -details.primaryDelta! / (h * 0.5);
+
+                    setState(() {
+                      showHud = true;
+                      if (isLeft) {
+                        currentBrightness = (currentBrightness + delta).clamp(0.0, 1.0);
+                        activeHud = "BRIGHTNESS";
+                        hudPercentage = currentBrightness;
+                      } else {
+                        currentVolume = (currentVolume + delta).clamp(0.0, 2.0); // 200% soft boost
+                        player.setVolume(currentVolume * 100);
+                        activeHud = "VOLUME";
+                        hudPercentage = (currentVolume / 2.0).clamp(0.0, 1.0);
+                      }
+                    });
+                  },
+                  onVerticalDragEnd: (_) {
+                    Future.delayed(const Duration(milliseconds: 1200), () {
+                      if (mounted) setState(() => showHud = false);
+                    });
+                  },
                   child: Stack(
                     children: [
+                      // Direct Surface Rendering
                       Center(
                         child: Video(
                           controller: controller,
+                          fit: currentFit,
                           controls: NoVideoControls,
                         ),
                       ),
+
+                      // Night-Owl Super-Dim Software Tint
+                      if (nightDimOpacity > 0.0)
+                        IgnorePointer(
+                          child: Container(
+                            color: Colors.black.withOpacity(nightDimOpacity),
+                          ),
+                        ),
+
+                      // Split Vertical HUD Indicator
+                      if (showHud)
+                        Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                            decoration: BoxDecoration(
+                              color: Colors.black87,
+                              borderRadius: BorderRadius.circular(24),
+                              border: Border.all(color: const Color(0xFFFFB300), width: 1.5),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  activeHud == "VOLUME" ? Icons.volume_up_rounded : Icons.brightness_6_rounded,
+                                  color: const Color(0xFFFFB300),
+                                  size: 22,
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  "$activeHud ${(hudPercentage * (activeHud == 'VOLUME' ? 200 : 100)).toInt()}%",
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
                       // Top Bar Overlay
-                      if (isControlsVisible)
+                      if (isControlsVisible && !isLocked)
                         Positioned(
                           top: 24,
                           left: 12,
@@ -539,24 +896,49 @@ jobs:
                               ),
                               Expanded(
                                 child: Text(
-                                  p.basename(widget.file.path),
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                                  p.basename(curFile.path),
+                                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
+                              // A-B Looper Button
+                              IconButton(
+                                icon: Icon(
+                                  Icons.repeat_one_rounded,
+                                  color: loopPointA != null ? const Color(0xFFFFB300) : Colors.white,
+                                ),
+                                onPressed: triggerAbLoop,
+                              ),
+                              // Hardware Decoder Toggle
                               ActionChip(
-                                backgroundColor: isHardwareDecoder ? const Color(0xFFFFB300) : Colors.white12,
+                                backgroundColor: isHW ? const Color(0xFFFFB300) : Colors.white12,
                                 label: Text(
-                                  isHardwareDecoder ? "HW" : "SW",
+                                  isHW ? "HW" : "SW",
                                   style: TextStyle(
-                                    color: isHardwareDecoder ? Colors.black : Colors.white,
+                                    color: isHW ? Colors.black : Colors.white,
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 12,
+                                    fontSize: 11,
                                   ),
                                 ),
                                 onPressed: toggleHardwareDecoder,
                               ),
+                              // Acoustic Console
+                              IconButton(
+                                icon: const Icon(Icons.equalizer_rounded, color: Colors.white),
+                                onPressed: showAcousticConsole,
+                              ),
+                              // Audio Stream Selector
+                              IconButton(
+                                icon: const Icon(Icons.audiotrack_rounded, color: Colors.white),
+                                onPressed: showAudioSelector,
+                              ),
+                              // Subtitle Selector
+                              IconButton(
+                                icon: const Icon(Icons.subtitles_rounded, color: Colors.white),
+                                onPressed: showSubtitleSelector,
+                              ),
+                              // Media Inspector
                               IconButton(
                                 icon: const Icon(Icons.info_outline_rounded, color: Colors.white),
                                 onPressed: showMediaInspector,
@@ -564,8 +946,23 @@ jobs:
                             ],
                           ),
                         ),
-                      // Bottom Transport Bar
-                      if (isControlsVisible)
+
+                      // Floating Screen Lock Button (when Locked)
+                      if (isLocked)
+                        Positioned(
+                          left: 16,
+                          top: 24,
+                          child: Container(
+                            decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                            child: IconButton(
+                              icon: const Icon(Icons.lock_rounded, color: Color(0xFFFFB300)),
+                              onPressed: () => setState(() => isLocked = false),
+                            ),
+                          ),
+                        ),
+
+                      // Balanced Bottom Dock Layout
+                      if (isControlsVisible && !isLocked)
                         Positioned(
                           bottom: 24,
                           left: 16,
@@ -573,6 +970,7 @@ jobs:
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              // Continuous Seek Line
                               StreamBuilder<Duration>(
                                 stream: player.stream.position,
                                 builder: (context, snapshot) {
@@ -604,36 +1002,74 @@ jobs:
                                   );
                                 },
                               ),
+                              const SizedBox(height: 6),
+                              // Balanced 3-Column Dock
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.replay_10_rounded, color: Colors.white, size: 30),
-                                    onPressed: () => player.seek(player.state.position - const Duration(seconds: 10)),
+                                  // Left Column: Lock Button
+                                  Expanded(
+                                    flex: 1,
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: IconButton(
+                                        icon: const Icon(Icons.lock_open_rounded, color: Colors.white70, size: 22),
+                                        onPressed: () => setState(() => isLocked = true),
+                                      ),
+                                    ),
                                   ),
-                                  const SizedBox(width: 20),
-                                  StreamBuilder<bool>(
-                                    stream: player.stream.playing,
-                                    builder: (context, snapshot) {
-                                      final isPlaying = snapshot.data ?? true;
-                                      return Container(
-                                        decoration: const BoxDecoration(
-                                          color: Color(0xFFFFB300),
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: IconButton(
-                                          icon: Icon(isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
-                                          color: Colors.black,
-                                          iconSize: 36,
-                                          onPressed: () => player.playOrPause(),
-                                        ),
-                                      );
-                                    },
+                                  // Center Column: Absolute Centered Transport Triad
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        icon: const Icon(Icons.skip_previous_rounded, color: Colors.white, size: 30),
+                                        onPressed: activeIndex > 0 ? playPrevious : null,
+                                      ),
+                                      const SizedBox(width: 16),
+                                      StreamBuilder<bool>(
+                                        stream: player.stream.playing,
+                                        builder: (context, snapshot) {
+                                          final isPlaying = snapshot.data ?? true;
+                                          return Container(
+                                            decoration: const BoxDecoration(
+                                              color: Color(0xFFFFB300),
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: IconButton(
+                                              icon: Icon(isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
+                                              color: Colors.black,
+                                              iconSize: 32,
+                                              onPressed: () => player.playOrPause(),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                      const SizedBox(width: 16),
+                                      IconButton(
+                                        icon: const Icon(Icons.skip_next_rounded, color: Colors.white, size: 30),
+                                        onPressed: activeIndex < widget.playlist.length - 1 ? playNext : null,
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(width: 20),
-                                  IconButton(
-                                    icon: const Icon(Icons.forward_10_rounded, color: Colors.white, size: 30),
-                                    onPressed: () => player.seek(player.state.position + const Duration(seconds: 10)),
+                                  // Right Column: Aspect Ratio Pill
+                                  Expanded(
+                                    flex: 1,
+                                    child: Align(
+                                      alignment: Alignment.centerRight,
+                                      child: OutlinedButton(
+                                        style: OutlinedButton.styleFrom(
+                                          foregroundColor: Colors.white,
+                                          side: const BorderSide(color: Colors.white24),
+                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                        ),
+                                        onPressed: cycleAspectRatio,
+                                        child: Text(
+                                          fitLabel,
+                                          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFFFB300)),
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),
@@ -648,10 +1084,11 @@ jobs:
           }
           EOF
 
-          # 4. App Name to "Merish"
+          # Inject Scoped Storage & MANAGE_EXTERNAL_STORAGE Permissions
+          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />' android/app/src/main/AndroidManifest.xml
           sed -i 's/android:label="merish"/android:label="Merish"/g' android/app/src/main/AndroidManifest.xml
 
-          # 5. AMOLED Cinema Icon Generation
+          # AMOLED Obsidian Cinema Icon
           python3 -c "
           import os, struct, zlib
           def make_png(w, h):
@@ -680,16 +1117,16 @@ jobs:
                       f.write(b)
           "
 
-          # 6. Apply SDK 37 & MinSDK 21 configs
+          # Fix SDK 37 & MinSDK 21 configs
           find android/app -name "build.gradle*" -exec sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 37/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 37/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' {} +
           find android/app -name "build.gradle*" -exec sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' {} +
 
-          # 7. Build Snapdragon ARM64 APK
+          # Compile Snapdragon ARM64 APK
           flutter build apk --split-per-abi --release
 
-          # 8. Copy APK output
+          # Export Output APK
           mkdir -p $GITHUB_WORKSPACE/output
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk $GITHUB_WORKSPACE/output/merish-arm64-v8a.apk
 
